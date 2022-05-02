@@ -27,12 +27,14 @@ mod_authnz_tailscale_la_LDFLAGS  = -module -ljansson -lcurl -export-symbols-rege
 
 
 OBJECTS = \
-    mod_authnz_tailscale.c
+    mod_authnz_tailscale.c \
+    ts_whois.c
 
 HFILES = \
-	mod_authnz_tailscale.h
+	mod_authnz_tailscale.h \
+    ts_whois.h
 
-mod_authnz_tailscale_la_SOURCES = $(HFILES) $(OBJECTS) libmd.la
+mod_authnz_tailscale_la_SOURCES = $(HFILES) $(OBJECTS)
 
 all: mod_authnz_tailscale.la
 

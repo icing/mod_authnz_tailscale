@@ -30,6 +30,9 @@
  */
 #define MOD_AUTHNZ_TAILSCALE_VERSION "@PACKAGE_VERSION@-git"
 
+/* user agent for requests */
+#define MOD_AUTHNZ_TAILSCALE_UA      "Apache mod_authnz_tailscale "##MOD_AUTHNZ_TAILSCALE_VERSION
+
 /**
  * @macro
  * Numerical representation of the version number of the module
