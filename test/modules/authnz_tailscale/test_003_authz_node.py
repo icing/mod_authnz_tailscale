@@ -4,16 +4,16 @@ from pyhttpd.conf import HttpdConf
 from .faker import TailscaleFaker
 
 
-class TestTailscale:
+class TestTSAuthzNode:
 
     UDS_PATH = None
     Faker = None
 
     @pytest.fixture(autouse=True, scope='class')
     def _class_scope(self, env):
-        TestTailscale.UDS_PATH = f"{env.gen_dir}/tailscale.sock"
-        faker = TailscaleFaker(env=env, path=TestTailscale.UDS_PATH)
-        TestTailscale.Faker = faker
+        TestTSAuthzNode.UDS_PATH = f"{env.gen_dir}/tailscale.sock"
+        faker = TailscaleFaker(env=env, path=TestTSAuthzNode.UDS_PATH)
+        TestTSAuthzNode.Faker = faker
         faker.start()
         HttpdConf(env).install()
         assert env.apache_restart() == 0
@@ -21,14 +21,14 @@ class TestTailscale:
         faker.stop()
 
     # no whois data set, require tailscale-user will fail
-    def test_authnz_tailscale_002_01(self, env):
+    def test_authnz_tailscale_003_01(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthzNode.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
-                "  Require tailscale-user ts_user_1",
+                "  Require tailscale-node client.test.tailnet",
                 "</Location>",
             ]
         })
@@ -39,23 +39,26 @@ class TestTailscale:
         r = env.curl_get(url)
         assert r.response["status"] == 403
 
-    # whois data set, require tailscale-user must succeed,
-    # but with 'AuthType tailscale' REMOTE_USER is not set
-    def test_authnz_tailscale_002_02(self, env):
+    # whois data set, require tailscale-node must succeed,
+    def test_authnz_tailscale_003_02(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthzNode.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
-                "  Require tailscale-user ts_user_1",
+                "  Require tailscale-node client.test.tailnet",
                 "</Location>",
             ]
         })
         conf.add_vhost_cgi()
         conf.install()
         assert env.apache_restart() == 0
-        TestTailscale.Faker.set_whois({
+        TestTSAuthzNode.Faker.set_whois({
+            "Node": {
+                "Name": "client.test.tailnet",
+                "ComputedName": "client",
+            },
             "UserProfile": {
                 "LoginName": "ts_user_1",
             }
@@ -63,24 +66,27 @@ class TestTailscale:
         url = env.mkurl("https", "cgi", "/hello.py")
         r = env.curl_get(url)
         assert r.response["status"] == 200
-        assert r.json['REMOTE_USER'] == ""
 
-    # whois data set, require tailscale-user must fail for other user
-    def test_authnz_tailscale_002_03(self, env):
+    # whois data set, require tailscale-node must fail for other node
+    def test_authnz_tailscale_003_03(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthzNode.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
-                "  Require tailscale-user ts_user_1",
+                "  Require tailscale-node client.test.tailnet",
                 "</Location>",
             ]
         })
         conf.add_vhost_cgi()
         conf.install()
         assert env.apache_restart() == 0
-        TestTailscale.Faker.set_whois({
+        TestTSAuthzNode.Faker.set_whois({
+            "Node": {
+                "Name": "client2.test.tailnet",
+                "ComputedName": "client2",
+            },
             "UserProfile": {
                 "LoginName": "ts_user_2",
             }
@@ -89,23 +95,27 @@ class TestTailscale:
         r = env.curl_get(url)
         assert r.response["status"] == 403
 
-    # whois data set, require tailscale-user must succeed if one user matches
+    # whois data set, require tailscale-node must succeed if one node matches
     # all on one line
-    def test_authnz_tailscale_002_04(self, env):
+    def test_authnz_tailscale_003_04(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthzNode.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
-                "  Require tailscale-user ts_user_1 ts_user_2 ts_user_3",
+                "  Require tailscale-node client.test.tailnet client2.test.tailnet",
                 "</Location>",
             ]
         })
         conf.add_vhost_cgi()
         conf.install()
         assert env.apache_restart() == 0
-        TestTailscale.Faker.set_whois({
+        TestTSAuthzNode.Faker.set_whois({
+            "Node": {
+                "Name": "client2.test.tailnet",
+                "ComputedName": "client2",
+            },
             "UserProfile": {
                 "LoginName": "ts_user_2",
             }
@@ -114,25 +124,29 @@ class TestTailscale:
         r = env.curl_get(url)
         assert r.response["status"] == 200
 
-    # whois data set, require tailscale-user must succeed if one user matches
+    # whois data set, require tailscale-node must succeed if one user matches
     # several lines
-    def test_authnz_tailscale_002_05(self, env):
+    def test_authnz_tailscale_003_05(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthzNode.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
-                "  Require tailscale-user ts_user_1",
-                "  Require tailscale-user ts_user_2",
-                "  Require tailscale-user ts_user_3",
+                "  Require tailscale-node client.test.tailnet",
+                "  Require tailscale-node client2.test.tailnet",
+                "  Require tailscale-node client3.test.tailnet",
                 "</Location>",
             ]
         })
         conf.add_vhost_cgi()
         conf.install()
         assert env.apache_restart() == 0
-        TestTailscale.Faker.set_whois({
+        TestTSAuthzNode.Faker.set_whois({
+            "Node": {
+                "Name": "client2.test.tailnet",
+                "ComputedName": "client2",
+            },
             "UserProfile": {
                 "LoginName": "ts_user_2",
             }
@@ -142,21 +156,25 @@ class TestTailscale:
         assert r.response["status"] == 200
 
     # whois data set, wildcard match all users
-    def test_authnz_tailscale_002_06(self, env):
+    def test_authnz_tailscale_003_06(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthzNode.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
-                "  Require tailscale-user *",
+                "  Require tailscale-node *",
                 "</Location>",
             ]
         })
         conf.add_vhost_cgi()
         conf.install()
         assert env.apache_restart() == 0
-        TestTailscale.Faker.set_whois({
+        TestTSAuthzNode.Faker.set_whois({
+            "Node": {
+                "Name": "client2.test.tailnet",
+                "ComputedName": "client2",
+            },
             "UserProfile": {
                 "LoginName": "ts_user_2",
             }

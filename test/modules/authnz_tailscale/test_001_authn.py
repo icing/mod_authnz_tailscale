@@ -4,16 +4,16 @@ from pyhttpd.conf import HttpdConf
 from .faker import TailscaleFaker
 
 
-class TestTailscale:
+class TestTSAuthn:
 
     UDS_PATH = None
     Faker = None
 
     @pytest.fixture(autouse=True, scope='class')
     def _class_scope(self, env):
-        TestTailscale.UDS_PATH = f"{env.gen_dir}/tailscale.sock"
-        faker = TailscaleFaker(env=env, path=TestTailscale.UDS_PATH)
-        TestTailscale.Faker = faker
+        TestTSAuthn.UDS_PATH = f"{env.gen_dir}/tailscale.sock"
+        faker = TailscaleFaker(env=env, path=TestTSAuthn.UDS_PATH)
+        TestTSAuthn.Faker = faker
         faker.start()
         HttpdConf(env).install()
         assert env.apache_restart() == 0
@@ -36,7 +36,7 @@ class TestTailscale:
     def test_authnz_tailscale_001_02(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthn.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
@@ -48,7 +48,7 @@ class TestTailscale:
         conf.add_vhost_cgi()
         conf.install()
         assert env.apache_restart() == 0
-        url = env.mkurl("https", "cgi", "/")
+        url = env.mkurl("https", "cgi", "/hello.py")
         r = env.curl_get(url)
         assert r.response["status"] == 401
 
@@ -57,7 +57,7 @@ class TestTailscale:
     def test_authnz_tailscale_001_03(self, env):
         conf = HttpdConf(env, extras={
             "base": {
-                f"AuthTailscaleURL {TestTailscale.UDS_PATH}",
+                f"AuthTailscaleURL {TestTSAuthn.UDS_PATH}",
             },
             f"cgi.{env.http_tld}": [
                 "<Location />",
@@ -69,7 +69,11 @@ class TestTailscale:
         conf.add_vhost_cgi()
         conf.install()
         assert env.apache_restart() == 0
-        TestTailscale.Faker.set_whois({
+        TestTSAuthn.Faker.set_whois({
+            "Node": {
+                "Name": "client.test.tailnet",
+                "ComputedName": "client",
+            },
             "UserProfile": {
                 "LoginName": "ts_user_1",
             }

@@ -1,0 +1,10 @@
+ * added tests for all authnz providers.
+ * Implemented authorization provider 'tailscale-node'.
+ * Implemented authorization provider 'tailscale-tailnet'.
+ * Added caching behaviour for tailscale whois information,
+   kept per connection for 1 second by default. Configurable
+   via `AuthTailscaleCacheTimeout` directive.
+ * Implemented authorization provider 'tailscale-user'.
+ * Implemented authentication provider 'tailnet'. When
+   `AuthType tailscale` is configured, the login name of the
+   tailscale user is set.

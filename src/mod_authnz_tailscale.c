@@ -37,6 +37,7 @@ module AP_MODULE_DECLARE_DATA authnz_tailscale_module;
 
 typedef struct {
     const char *tailscale_socket;
+    apr_interval_time_t cache_duration;
 } ts_srv_config_t;
 
 static void *create_srv_config(apr_pool_t *pool, server_rec *s)
@@ -59,6 +60,7 @@ static void *merge_srv_config(apr_pool_t *pool, void *basev, void *addv)
 
 typedef struct {
     const char *tailscale_socket;
+    apr_time_t updated;
     ts_whois_t whois;
 } ts_conn_ctx_t;
 
@@ -79,18 +81,45 @@ static ts_conn_ctx_t *ts_conn_ctx_rget(request_rec *r)
     }
     else if (strcmp(config->tailscale_socket, ctx->tailscale_socket)) {
         /* if this request has another tailscale socket configured than
-         * the last one on this connection, reset the connection information
-         */
-        memset(&ctx->whois, 0, sizeof(ctx->whois));
+         * the last one on this connection, reset. */
+        memset(&ctx, 0, sizeof(ctx));
+        ctx->tailscale_socket = config->tailscale_socket;
     }
     return ctx;
+}
+
+static void assure_recent_whois(ts_conn_ctx_t *ctx, request_rec *r)
+{
+    apr_status_t rv;
+    ts_srv_config_t *config = ap_get_module_config(r->server->module_config,
+                                                   &authnz_tailscale_module);
+
+    if (ctx->tailscale_socket
+        && (!ctx->updated
+            || (apr_time_now() - ctx->updated) > config->cache_duration)) {
+        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                      "get whois from tailscale demon at '%s'", ctx->tailscale_socket);
+        rv = ts_whois_get(&ctx->whois, r, ctx->tailscale_socket);
+        ctx->updated = apr_time_now();
+        if (APR_SUCCESS != rv) {
+            ap_log_rerror(APLOG_MARK, APLOG_TRACE1, rv, r,
+                          "getting tailscale whois");
+        }
+        else if (ctx->whois.login_name[0]) {
+            ap_log_rerror(APLOG_MARK, APLOG_TRACE1, rv, r,
+                          "tailscale user is: %s", ctx->whois.login_name);
+        }
+        else {
+            ap_log_rerror(APLOG_MARK, APLOG_TRACE1, rv, r,
+                          "not a tailscale client");
+        }
+    }
 }
 
 static int authenticate_ts_user(request_rec *r)
 {
     ts_conn_ctx_t *ctx;
     const char *current_auth;
-    apr_status_t rv;
 
     /* Are we active here? */
     current_auth = ap_auth_type(r);
@@ -100,21 +129,15 @@ static int authenticate_ts_user(request_rec *r)
 
     ctx = ts_conn_ctx_rget(r);
     if (ctx->tailscale_socket) {
-        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
-                      "get whois from tailscale demon at '%s'", ctx->tailscale_socket);
-        rv = ts_whois_get(&ctx->whois, r, ctx->tailscale_socket);
-        if (APR_SUCCESS != rv) {
-            ap_log_rerror(APLOG_MARK, APLOG_TRACE1, rv, r,
-                          "no whois from tailscale demon");
-            goto denied;
+        assure_recent_whois(ctx, r);
+        if (ctx->whois.login_name[0]) {
+            ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                          "authn tailscale user: %s", ctx->whois.login_name);
+            r->user = ctx->whois.login_name;
+            return OK;
         }
-        AP_DEBUG_ASSERT(ctx->whois.user[0]);
-        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, rv, r,
-                      "found tailscale user: %s", ctx->whois.user);
-        r->user = ctx->whois.user;
-        return OK;
+        /* not a tailscale connection */
     }
-denied:
     return HTTP_UNAUTHORIZED;
 }
 
@@ -143,7 +166,6 @@ static authz_status tsuser_check_authorization(request_rec *r,
     const char *require, *err = NULL;
     const char *tokens;
     char *w;
-    apr_status_t rv;
 
     (void)require_args;
     ctx = ts_conn_ctx_rget(r);
@@ -159,19 +181,18 @@ static authz_status tsuser_check_authorization(request_rec *r,
         goto denied;
     }
 
-    rv = ts_whois_get(&ctx->whois, r, ctx->tailscale_socket);
-    if (APR_SUCCESS != rv) {
-        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, rv, r,
-                      "no whois from tailscale demon");
+    assure_recent_whois(ctx, r);
+    if (!ctx->whois.login_name[0]) {
+        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                      "not a tailscale client");
         goto denied;
     }
-    AP_DEBUG_ASSERT(ctx->whois.user[0]);
-    ap_log_rerror(APLOG_MARK, APLOG_TRACE1, rv, r,
-                  "found tailscale user: %s", ctx->whois.user);
+    ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                  "found tailscale user: %s", ctx->whois.login_name);
 
     tokens = require;
     while ((w = ap_getword_conf(r->pool, &tokens)) && w[0]) {
-        if (!strcmp(ctx->whois.user, w) || !strcmp("*", w)) {
+        if (!strcmp(ctx->whois.login_name, w) || !strcmp("*", w)) {
             ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, APLOGNO()
                           "auth_tailscale authorization successful");
             return AUTHZ_GRANTED;
@@ -179,7 +200,7 @@ static authz_status tsuser_check_authorization(request_rec *r,
     }
     ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, APLOGNO(01706)
                   "auth_tailscale authorize, user '%s' did not match: '%s'",
-                  ctx->whois.user, require);
+                  ctx->whois.login_name, require);
 
 denied:
     return AUTHZ_DENIED;
@@ -188,6 +209,114 @@ denied:
 static const authz_provider authz_tsuser_provider =
 {
     &tsuser_check_authorization,
+    &ts_parse_config,
+};
+
+static authz_status tsnode_check_authorization(request_rec *r,
+                                               const char *require_args,
+                                               const void *parsed_require_args)
+{
+    ts_conn_ctx_t *ctx;
+    const char *require, *err = NULL;
+    const char *tokens;
+    char *w;
+
+    (void)require_args;
+    ctx = ts_conn_ctx_rget(r);
+    if (!ctx->tailscale_socket) {
+        goto denied;
+    }
+
+    require = ap_expr_str_exec(r, parsed_require_args, &err);
+    if (err) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, APLOGNO()
+                      "auth_tailscale authorize: require node: Can't evaluate expression: %s",
+                      err);
+        goto denied;
+    }
+
+    assure_recent_whois(ctx, r);
+    if (!ctx->whois.node_name[0]) {
+        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                      "not a tailscale node");
+        goto denied;
+    }
+    ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                  "found tailscale node: %s", ctx->whois.node_name);
+
+    tokens = require;
+    while ((w = ap_getword_conf(r->pool, &tokens)) && w[0]) {
+        if (!strcmp(ctx->whois.node_name, w) || !strcmp("*", w)) {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, APLOGNO()
+                          "auth_tailscale authorization successful");
+            return AUTHZ_GRANTED;
+        }
+    }
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, APLOGNO(01706)
+                  "auth_tailscale authorize, node '%s' did not match: '%s'",
+                  ctx->whois.node_name, require);
+
+denied:
+    return AUTHZ_DENIED;
+}
+
+static const authz_provider authz_tsnode_provider =
+{
+    &tsnode_check_authorization,
+    &ts_parse_config,
+};
+
+static authz_status tsnet_check_authorization(request_rec *r,
+                                              const char *require_args,
+                                              const void *parsed_require_args)
+{
+    ts_conn_ctx_t *ctx;
+    const char *require, *err = NULL;
+    const char *tokens;
+    char *w;
+
+    (void)require_args;
+    ctx = ts_conn_ctx_rget(r);
+    if (!ctx->tailscale_socket) {
+        goto denied;
+    }
+
+    require = ap_expr_str_exec(r, parsed_require_args, &err);
+    if (err) {
+        ap_log_rerror(APLOG_MARK, APLOG_ERR, 0, r, APLOGNO()
+                      "auth_tailscale authorize: require tailnet: Can't evaluate expression: %s",
+                      err);
+        goto denied;
+    }
+
+    assure_recent_whois(ctx, r);
+    if (!ctx->whois.node_name[0]) {
+        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                      "not a tailscale tailnet");
+        goto denied;
+    }
+    ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                  "found tailscale tailnet: %s", ctx->whois.tailnet);
+
+    tokens = require;
+    while ((w = ap_getword_conf(r->pool, &tokens)) && w[0]) {
+        if (!strcmp(ctx->whois.tailnet, w) || !strcmp("*", w)) {
+            ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, APLOGNO()
+                          "auth_tailscale authorization successful");
+            return AUTHZ_GRANTED;
+        }
+    }
+    ap_log_rerror(APLOG_MARK, APLOG_DEBUG, 0, r, APLOGNO(01706)
+                  "auth_tailscale authorize, tailnet '%s' did not match: '%s'",
+                  ctx->whois.tailnet, require);
+
+denied:
+    return AUTHZ_DENIED;
+}
+
+static const authz_provider authz_tsnet_provider =
+{
+    &tsnet_check_authorization,
     &ts_parse_config,
 };
 
@@ -208,6 +337,9 @@ static apr_status_t post_config(apr_pool_t *p, apr_pool_t *plog,
         config = ap_get_module_config(s->module_config, &authnz_tailscale_module);
         if (!config->tailscale_socket) {
             config->tailscale_socket = TAILSCALE_DEF_URL;
+        }
+        if (!config->cache_duration) {
+            config->cache_duration = apr_time_from_sec(1);
         }
     }
 
@@ -242,10 +374,22 @@ static const char *cmd_ts_parse_url(cmd_parms *cmd, void *config, const char *ur
     return NULL;
 }
 
+static const char *cmd_ts_cache_duration(cmd_parms *cmd, void *config, const char *val)
+{
+    ts_srv_config_t *conf = ap_get_module_config(cmd->server->module_config,
+                                                 &authnz_tailscale_module);
+    (void)config;
+    if (ap_timeout_parameter_parse(val, &(conf->cache_duration), "s") != APR_SUCCESS)
+        return "AuthTailscaleCacheDuration timeout has wrong format";
+    return NULL;
+}
+
 static const command_rec authnz_ts_cmds[] =
 {
     AP_INIT_TAKE1("AuthTailscaleURL", cmd_ts_parse_url, NULL, RSRC_CONF,
                   "URL or path to unix socket of tailscale demon"),
+    AP_INIT_TAKE1("AuthTailscaleCacheTimeout", cmd_ts_cache_duration, NULL, RSRC_CONF,
+                  "how long to cache tailscale information"),
     AP_INIT_TAKE1(NULL, NULL, NULL, RSRC_CONF, NULL)
 };
 
@@ -259,6 +403,14 @@ static void register_hooks(apr_pool_t *p)
     ap_register_auth_provider(p, AUTHZ_PROVIDER_GROUP, "tailscale-user",
                               AUTHZ_PROVIDER_VERSION,
                               &authz_tsuser_provider,
+                              AP_AUTH_INTERNAL_PER_CONF);
+    ap_register_auth_provider(p, AUTHZ_PROVIDER_GROUP, "tailscale-node",
+                              AUTHZ_PROVIDER_VERSION,
+                              &authz_tsnode_provider,
+                              AP_AUTH_INTERNAL_PER_CONF);
+    ap_register_auth_provider(p, AUTHZ_PROVIDER_GROUP, "tailscale-tailnet",
+                              AUTHZ_PROVIDER_VERSION,
+                              &authz_tsnet_provider,
                               AP_AUTH_INTERNAL_PER_CONF);
 
     ap_hook_post_config(post_config, NULL, NULL, APR_HOOK_MIDDLE);

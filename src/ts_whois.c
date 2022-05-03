@@ -201,6 +201,30 @@ static size_t resp_data_cb(void *data, size_t len, size_t nmemb, void *baton)
     return blen;
 }
 
+static const char *get_jstring(json_t *jobject, const char *key, const char *defval)
+{
+    json_t *jstr = json_object_get(jobject, key);
+    if (jstr && json_is_string(jstr)) {
+        return json_string_value(jstr);
+    }
+    return defval;
+}
+
+static int name_is_ok(const char *name, const char *label, request_rec *r)
+{
+    if (!name) {
+        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                      "%s not found in response", label);
+        return 0;
+    }
+    if (strlen(name) > TS_NAME_MAXLEN) {
+        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                      "%s too long: '%s'", label, name);
+        return 0;
+    }
+    return 1;
+}
+
 apr_status_t ts_whois_get(ts_whois_t *whois, request_rec *r, const char *uds_path)
 {
     CURL *curl;
@@ -212,7 +236,9 @@ apr_status_t ts_whois_get(ts_whois_t *whois, request_rec *r, const char *uds_pat
     const char *ctype, *s;
     long l;
     json_t *json = NULL;
-    const char *login_name = NULL;
+    const char *login_name = NULL, *display_name = NULL;
+    const char *profile_pic_url = NULL;
+    const char *node_name = NULL, *tailnet = NULL;
 
     ap_assert(uds_path);
 
@@ -265,11 +291,18 @@ apr_status_t ts_whois_get(ts_whois_t *whois, request_rec *r, const char *uds_pat
                       curle, curl_easy_strerror(curle));
         goto leave;
     }
-    if (l != 200) {
-        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
-                      "unexpected HTTP response status: %ld", l);
-        rv = APR_EGENERAL;
-        goto leave;
+
+    switch(l) {
+        case 200:
+            break;
+        case 404:
+            memset(whois, 0, sizeof(*whois));
+            goto leave;
+        default:
+            ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                          "unexpected HTTP response status: %ld", l);
+            rv = APR_EGENERAL;
+            goto leave;
     }
 
     /* got a 200 response, should have a JSON body */
@@ -295,27 +328,52 @@ apr_status_t ts_whois_get(ts_whois_t *whois, request_rec *r, const char *uds_pat
         goto leave;
     }
     if (json_is_object(json)) {
-        json_t *jprofile = json_object_get(json, "UserProfile");
+        json_t *jprofile, *jnode;
+
+        jprofile = json_object_get(json, "UserProfile");
         if (jprofile && json_is_object(jprofile)) {
-            json_t *jlogin = json_object_get(jprofile, "LoginName");
-            if (jlogin && json_is_string(jlogin)) {
-                login_name = json_string_value(jlogin);
+            login_name = get_jstring(jprofile, "LoginName", NULL);
+            display_name = get_jstring(jprofile, "DisplayName", NULL);
+            profile_pic_url = get_jstring(jprofile, "ProfilePicURL", NULL);
+        }
+
+        jnode = json_object_get(json, "Node");
+        if (jnode && json_is_object(jnode)) {
+            const char *node_comp_name;
+
+            node_name = get_jstring(jnode, "Name", NULL);
+            node_comp_name = get_jstring(jnode, "ComputedName", NULL);
+            if (node_name && node_comp_name) {
+                size_t nlen = strlen(node_comp_name);
+                if (strlen(node_name) > nlen + 1
+                    && node_name[nlen] == '.'
+                    && !strncmp(node_name, node_comp_name, nlen)) {
+                    tailnet = node_name + nlen + 1;
+                }
             }
         }
     }
-    if (!login_name) {
-        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
-                      "UserProfile/LoginName not found in response");
+
+    if (!name_is_ok(login_name, "LoginName", r)
+        || !name_is_ok(node_name, "NodeName", r)
+        || !name_is_ok(tailnet, "Tailnet", r)) {
         rv = APR_EINVAL;
         goto leave;
     }
-    if (strlen(login_name) > TS_USER_MAXLEN) {
-        ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
-                      "UserProfile/LoginName too long: %s", login_name);
-        rv = APR_EINVAL;
-        goto leave;
+
+    ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
+                  "tailscale LoginName(%s), tailnet(%s)",
+                  login_name, tailnet);
+    memset(whois, 0, sizeof(*whois));
+    strcpy(whois->login_name, login_name);
+    strcpy(whois->node_name, node_name);
+    strcpy(whois->tailnet, tailnet);
+    if (display_name && strlen(display_name) <= TS_NAME_MAXLEN) {
+       strcpy(whois->display_name, display_name);
     }
-    strcpy(whois->user, login_name);
+    if (profile_pic_url && strlen(profile_pic_url) <= TS_NAME_MAXLEN) {
+       strcpy(whois->profile_pic_url, profile_pic_url);
+    }
 
 leave:
     if (curl) curl_easy_cleanup(curl);

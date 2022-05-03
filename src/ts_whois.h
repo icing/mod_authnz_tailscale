@@ -18,10 +18,14 @@
 #ifndef mod_authnz_tailscale_ts_whois_h
 #define mod_authnz_tailscale_ts_whois_h
 
-#define TS_USER_MAXLEN      128
+#define TS_NAME_MAXLEN      127
 
 typedef struct {
-    char user[TS_USER_MAXLEN+1];
+    char login_name[TS_NAME_MAXLEN+1];
+    char display_name[TS_NAME_MAXLEN+1];
+    char profile_pic_url[TS_NAME_MAXLEN+1];
+    char node_name[TS_NAME_MAXLEN+1];
+    char tailnet[TS_NAME_MAXLEN+1];
 } ts_whois_t;
 
 apr_status_t ts_whois_get(ts_whois_t *whois, request_rec *r, const char *uds_path);
