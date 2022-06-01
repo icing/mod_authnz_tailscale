@@ -355,8 +355,8 @@ apr_status_t ts_whois_get(ts_whois_t *whois, request_rec *r, const char *uds_pat
     }
 
     if (!name_is_ok(login_name, "LoginName", r)
-        || !name_is_ok(node_name, "NodeName", r)
-        || !name_is_ok(tailnet, "Tailnet", r)) {
+        && !name_is_ok(node_name, "NodeName", r)
+        && !name_is_ok(tailnet, "Tailnet", r)) {
         rv = APR_EINVAL;
         goto leave;
     }
