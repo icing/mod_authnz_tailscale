@@ -363,11 +363,12 @@ apr_status_t ts_whois_get(ts_whois_t *whois, request_rec *r, const char *uds_pat
 
     ap_log_rerror(APLOG_MARK, APLOG_TRACE1, 0, r,
                   "tailscale LoginName(%s), tailnet(%s)",
-                  login_name, tailnet);
+                  login_name? login_name : "-",
+                  tailnet? tailnet : "-");
     memset(whois, 0, sizeof(*whois));
-    strcpy(whois->login_name, login_name);
-    strcpy(whois->node_name, node_name);
-    strcpy(whois->tailnet, tailnet);
+    if (login_name) strcpy(whois->login_name, login_name);
+    if (node_name) strcpy(whois->node_name, node_name);
+    if (tailnet) strcpy(whois->tailnet, tailnet);
     if (display_name && strlen(display_name) <= TS_NAME_MAXLEN) {
        strcpy(whois->display_name, display_name);
     }
